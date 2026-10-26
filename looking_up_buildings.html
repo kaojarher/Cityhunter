@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>仰望大樓・線條</title>
+<style>
+  html,body{margin:0;height:100%;background:#05070d;overflow:hidden}
+  canvas{display:block;width:100%;height:100%}
+  .bar{position:fixed;top:14px;left:50%;transform:translateX(-50%);width:min(86vw,420px);z-index:2;opacity:0;pointer-events:none;transition:opacity .25s}
+  .bar.show{opacity:1;pointer-events:auto}
+  .bar input{width:100%;box-sizing:border-box;padding:10px 16px;font:16px system-ui,sans-serif;
+       color:#bfe9ff;background:rgba(5,7,13,.75);border:1px solid #78d2ff;border-radius:999px;outline:none;text-align:center}
+  .bar input::placeholder{color:#4f6f95}
+  .bar input:focus{box-shadow:0 0 0 2px rgba(120,210,255,.3)}
+  .tip{position:fixed;left:0;right:0;bottom:12px;text-align:center;color:#6f8fb8;
+       font:13px/1.4 system-ui,sans-serif;opacity:.7;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="bar" id="bar"><input id="theme" type="text" maxlength="30" value="City Hunter" placeholder="輸入主題文字…" autocomplete="off"></div>
+<canvas id="c"></canvas>
+<div class="tip">點擊暫停／繼續　·　按 Enter 或雙擊畫面輸入主題</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, F, dpr;
+function resize(){
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = cv.width = innerWidth * dpr; H = cv.height = innerHeight * dpr;
+  F = Math.min(W, H * 1.2) * 0.9;
+}
+addEventListener('resize', resize); resize();
+
+const CAM_H = 1.6, PITCH = 1.12, STREET = 6, NEAR = 0.5, VIEW = 420;
+const BG = '#05070d', LINE = [120, 210, 255];
+let camZ = 0, t = 0, paused = false, speed = 14, sway = 0, pitch = PITCH;
+cv.addEventListener('pointerdown', () => paused = !paused);
+const themeInput = document.getElementById('theme'), bar = document.getElementById('bar');
+function showBar(){ bar.classList.add('show'); themeInput.focus(); themeInput.select(); }
+function hideBar(){ bar.classList.remove('show'); themeInput.blur(); }
+cv.addEventListener('dblclick', showBar);
+addEventListener('keydown', e => {
+  if (document.activeElement === themeInput) {
+    if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); hideBar(); }
+  } else if (e.key === 'Enter' || e.key.toLowerCase() === 't') { e.preventDefault(); showBar(); }
+});
+themeInput.addEventListener('blur', () => bar.classList.remove('show'));
+
+let seed = 7;
+const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+const blds = [], nextZ = { '-1': -10, '1': -10 };
+function spawn(){
+  for (const side of [-1, 1]) {
+    while (nextZ[side] < camZ + VIEW) {
+      const d = 9 + rnd() * 12, w = 10 + rnd() * 14, h = 40 + rnd() * 110;
+      const z0 = nextZ[side] + rnd() * 3;
+      const xin = side * STREET, xout = side * (STREET + w);
+      blds.push({ side, x0: Math.min(xin, xout), x1: Math.max(xin, xout), z0, z1: z0 + d, h });
+      nextZ[side] = z0 + d;
+    }
+  }
+  for (let i = blds.length - 1; i >= 0; i--) if (blds[i].z1 < camZ - 10) blds.splice(i, 1);
+}
+
+function cam(x, y, z){
+  const dx = x - sway, dy = y - CAM_H, dz = z - camZ;
+  const s = Math.sin(pitch), c = Math.cos(pitch);
+  return [dx, dy * c - dz * s, dy * s + dz * c];
+}
+const scr = p => [W / 2 + F * p[0] / p[2], H / 2 - F * p[1] / p[2]];
+
+function clipPoly(pts){
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const ain = a[2] > NEAR, bin = b[2] > NEAR;
+    if (ain) out.push(a);
+    if (ain !== bin) {
+      const k = (NEAR - a[2]) / (b[2] - a[2]);
+      out.push([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, NEAR]);
+    }
+  }
+  return out;
+}
+function clipSeg(a, b){
+  const ain = a[2] > NEAR, bin = b[2] > NEAR;
+  if (!ain && !bin) return null;
+  if (ain && bin) return [a, b];
+  const k = (NEAR - a[2]) / (b[2] - a[2]);
+  const m = [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, NEAR];
+  return ain ? [a, m] : [m, b];
+}
+function seg(a, b){
+  const s = clipSeg(a, b); if (!s) return;
+  const p = scr(s[0]), q = scr(s[1]);
+  ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]);
+}
+
+// 一個面：先用背景色遮擋，再畫邊框與樓層／欄位線
+function face(o, U, V, nu, nv, fog, near){
+  const P = (u, v) => cam(o[0] + U[0]*u + V[0]*v, o[1] + U[1]*u + V[1]*v, o[2] + U[2]*u + V[2]*v);
+  const c = [P(0,0), P(1,0), P(1,1), P(0,1)];
+  const poly = clipPoly(c);
+  if (poly.length < 3) return;
+  ctx.beginPath();
+  poly.forEach((p, i) => { const s = scr(p); i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]); });
+  ctx.closePath(); ctx.fillStyle = BG; ctx.fill();
+
+  const a = 1 - fog;
+  ctx.strokeStyle = `rgba(${LINE[0]},${LINE[1]},${LINE[2]},${a})`;
+  ctx.lineWidth = 1.4 * dpr;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) seg(c[i], c[(i + 1) % 4]);
+  ctx.stroke();
+
+  if (near > 230) return;
+  ctx.strokeStyle = `rgba(${LINE[0]},${LINE[1]},${LINE[2]},${a * 0.45})`;
+  ctx.lineWidth = 0.8 * dpr;
+  ctx.beginPath();
+  for (let j = 1; j < nv; j++) seg(P(0, j / nv), P(1, j / nv));
+  for (let i = 1; i < nu; i++) seg(P(i / nu, 0), P(i / nu, 1));
+  ctx.stroke();
+}
+
+let last = performance.now();
+function frame(now){
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  if (!paused) { t += dt; camZ += speed * dt; }
+  sway = Math.sin(t * 0.6) * 0.9;
+  pitch = PITCH + Math.sin(t * 0.45) * 0.05;
+  spawn();
+
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+  ctx.lineJoin = 'round';
+
+  const list = blds.filter(b => b.z1 > camZ - 2).sort((a, b) => b.z0 - a.z0);
+  for (const b of list) {
+    const near = Math.max(b.z0 - camZ, 1), fog = Math.min(near / VIEW, 1) ** 1.2;
+    const nv = Math.round(b.h / 3.2);
+    face([b.side * STREET, 0, b.z0], [0, 0, b.z1 - b.z0], [0, b.h, 0], Math.round((b.z1 - b.z0) / 3.2), nv, fog, near);
+    face([b.x0, 0, b.z0], [b.x1 - b.x0, 0, 0], [0, b.h, 0], Math.round((b.x1 - b.x0) / 3.2), nv, fog, near);
+  }
+  drawTheme();
+  requestAnimationFrame(frame);
+}
+function drawTheme(){
+  const txt = themeInput.value.trim();
+  if (!txt) return;
+  let size = H * 0.11;
+  ctx.font = `700 ${size}px system-ui, "PingFang TC", "Microsoft JhengHei", sans-serif`;
+  const w = ctx.measureText(txt).width;
+  if (w > W * 0.86) { size *= W * 0.86 / w; ctx.font = `700 ${size}px system-ui, "PingFang TC", "Microsoft JhengHei", sans-serif`; }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const y = H * 0.24 + Math.sin(t * 0.8) * H * 0.008;
+  ctx.fillStyle = BG; ctx.fillText(txt, W / 2, y);
+  ctx.strokeStyle = `rgb(${LINE[0]},${LINE[1]},${LINE[2]})`;
+  ctx.lineWidth = 1.8 * dpr; ctx.strokeText(txt, W / 2, y);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
